@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# data
+data/
+*.npz
+*.h5
+*.hdf5
+
+# checkpoints
+checkpoints/
+*.pt
+*.pth
+
+# env
+.venv/
+venv/
+.env
+
+# editors
+.vscode/
+.idea/
+*.swp
+
+# jupyter
+.ipynb_checkpoints/
+
+# macos
+.DS_Store
