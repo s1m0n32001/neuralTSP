@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -22,7 +22,3 @@ class ModelConfig:
     # feed-forward hidden dim
     d_ff: int = 512
     dropout: float = 0.1
-
-    # triangular attention: how many random points to sample per foreign cell
-    # (currently fixed at 1, kept as config for future ablations)
-    foreign_samples_per_cell: int = 1
