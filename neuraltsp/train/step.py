@@ -197,10 +197,17 @@ def training_step(
 
     E_old = tour_length(tour, coords)
 
+    if N < 4:
+        # Too few cities for a meaningful 2-opt with interior boundaries.
+        return StepResult(accepted=False, E_old=E_old, E_new=E_old, tour=tour)
+
     # ------------------------------------------------------------------ #
     # 2. 2-opt move                                                       #
     # ------------------------------------------------------------------ #
-    i, j = sorted(rng.choice(N, size=2, replace=False).tolist())
+    # Sample from [1, N-1) so the reversed segment always has a boundary
+    # city on each side (new_tour[i-1] and new_tour[j+1] always exist).
+    # This guarantees _swap_losses can compute both pointer losses.
+    i, j = sorted(rng.choice(np.arange(1, N - 1), size=2, replace=False).tolist())
     new_tour = tour[:i] + tour[i:j + 1][::-1] + tour[j + 1:]
 
     E_new = tour_length(new_tour, coords)
