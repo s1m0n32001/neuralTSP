@@ -39,7 +39,7 @@ candidate set, or if K == 1 (trivially correct, zero information).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -55,6 +55,9 @@ class StepResult:
     accepted: bool
     E_old: float
     E_new: float
+    # Current tour after the step: new_tour if accepted, original tour if not.
+    # The caller should write this back to the PathCache.
+    tour: list[int] = None             # type: ignore[assignment]
     loss: float | None = None          # None if no loss term was computed
     n_loss_terms: int = 0              # 0 if not accepted or both skipped
 
@@ -180,6 +183,7 @@ def training_step(
     rng: np.random.Generator,
     device: torch.device,
     temperature: float,
+    cached_tour: list[int] | None = None,
 ) -> StepResult:
     """
     One training iteration on a single TSP instance.
@@ -194,15 +198,26 @@ def training_step(
     rng         : numpy RNG (controls tour prediction sampling + candidate sampling)
     device      : torch device
     temperature : SA temperature T ≥ 0; if 0 only improvements are accepted
+    cached_tour : if provided, skip autoregressive prediction and use this tour
+                  as the starting point for the SA move
+
+    Returns
+    -------
+    StepResult whose `.tour` field holds the current tour after the step
+    (new_tour if the swap was accepted, original tour otherwise).
+    The caller should write this back to the PathCache.
     """
     N = len(coords)
 
     # ------------------------------------------------------------------ #
-    # 1. Predict current tour (no gradient)                               #
+    # 1. Obtain current tour — from cache or fresh prediction             #
     # ------------------------------------------------------------------ #
-    model.eval()
-    with torch.no_grad():
-        tour = predict_tour(model, coords, cell_ids, grid_size, rng, device)
+    if cached_tour is not None:
+        tour = cached_tour
+    else:
+        model.eval()
+        with torch.no_grad():
+            tour = predict_tour(model, coords, cell_ids, grid_size, rng, device)
 
     E_old = tour_length(tour, coords)
 
@@ -227,7 +242,7 @@ def training_step(
         accepted = False
 
     if not accepted:
-        return StepResult(accepted=False, E_old=E_old, E_new=E_new)
+        return StepResult(accepted=False, E_old=E_old, E_new=E_new, tour=tour)
 
     # ------------------------------------------------------------------ #
     # 4. Compute up to four loss terms and backprop                       #
@@ -249,7 +264,7 @@ def training_step(
             loss_terms.append(term)
 
     if not loss_terms:
-        return StepResult(accepted=True, E_old=E_old, E_new=E_new, n_loss_terms=0)
+        return StepResult(accepted=True, E_old=E_old, E_new=E_new, tour=new_tour, n_loss_terms=0)
 
     total_loss = sum(loss_terms)   # type: ignore[arg-type]
 
@@ -261,6 +276,7 @@ def training_step(
         accepted=True,
         E_old=E_old,
         E_new=E_new,
+        tour=new_tour,
         loss=total_loss.item(),
         n_loss_terms=len(loss_terms),
     )

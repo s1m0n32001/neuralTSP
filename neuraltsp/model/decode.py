@@ -72,10 +72,7 @@ def predict_tour(
         # --- forward pass ---
         logits = model(coords_t, is_start_t)   # (1, 2+K)
 
-        # mask P (pos 0) and A (pos 1) — they are never next-city candidates
-        logits[0, 0] = float("-inf")
-        logits[0, 1] = float("-inf")
-
+        # positions 0 (P) and 1 (A) are never candidates; slice directly
         candidate_logits = logits[0, 2:]       # (K,)
 
         # --- choose next city ---

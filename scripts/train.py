@@ -29,6 +29,7 @@ from neuraltsp.config import ModelConfig
 from neuraltsp.data.dataset import TSPDataset
 from neuraltsp.model.decode import predict_tour
 from neuraltsp.model.model import TSPTransformer
+from neuraltsp.train.cache import PathCache
 from neuraltsp.train.eval import evaluate_dataset
 from neuraltsp.train.plot import plot_tour
 from neuraltsp.train.step import training_step
@@ -120,6 +121,8 @@ def parse_args() -> argparse.Namespace:
                    help="Run validation every N epochs (default: 10)")
     p.add_argument("--n_val_plots", type=int, default=4,
                    help="Number of val instances to plot per val run (default: 4)")
+    p.add_argument("--cache_reset_every", type=int, default=10,
+                   help="Wipe tour cache every N epochs, forcing fresh prediction (default: 10)")
     # logging / checkpointing
     p.add_argument("--log_dir",        type=Path, default=Path("logs"))
     p.add_argument("--checkpoint_dir", type=Path, default=Path("checkpoints"))
@@ -164,21 +167,36 @@ def main() -> None:
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     grid_size = train_dataset.grid_size
+    cache = PathCache()
 
     for epoch in range(args.epochs):
+        # wipe cache at epoch 0 and every cache_reset_every epochs thereafter
+        if epoch % args.cache_reset_every == 0:
+            cache.wipe()
+
         T = temperature_at(epoch, args.epochs, args.T_start, args.T_end)
         order = rng.permutation(len(train_dataset))
-        epoch_losses, n_accepted = [], 0
+        epoch_losses, n_accepted, n_predicted = [], 0, 0
 
         for idx in tqdm(order, desc=f"Epoch {epoch+1}/{args.epochs}  T={T:.4f}", leave=False):
-            item = train_dataset[int(idx)]
+            idx = int(idx)
+            item = train_dataset[idx]
             coords = item["coords"].numpy()
             cell_ids = item["cell_ids"].numpy()
+
+            cached_tour = cache.get(idx)
+            if cached_tour is None:
+                n_predicted += 1
 
             result = training_step(
                 model, optimizer, coords, cell_ids,
                 grid_size, rng, device, temperature=T,
+                cached_tour=cached_tour,
             )
+
+            # write the current tour back to cache (accepted → new_tour, else unchanged)
+            cache.set(idx, result.tour)
+
             if result.accepted:
                 n_accepted += 1
             if result.loss is not None:
@@ -188,7 +206,8 @@ def main() -> None:
         accept_rate = n_accepted / len(train_dataset)
         print(
             f"Epoch {epoch+1:4d}  T={T:.4f}  "
-            f"loss={avg_loss:.4f}  accept={accept_rate:.2%}"
+            f"loss={avg_loss:.4f}  accept={accept_rate:.2%}  "
+            f"predicted={n_predicted}/{len(train_dataset)}"
         )
 
         # --- validation ---

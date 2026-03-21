@@ -34,8 +34,8 @@ def evaluate_dataset(
     dataset      : TSPDataset
     grid_size    : cells per axis
     device       : torch device
-    seed         : RNG seed — only affects candidate sampling order;
-                   greedy argmax makes the start city and decision deterministic
+    seed         : fixes both the start-city choice and candidate sampling,
+                   making evaluation fully deterministic across calls
     show_progress: show a tqdm bar
 
     Returns
