@@ -2,6 +2,8 @@
 
 A transformer-based solver for the **Traveling Salesman Problem (TSP)** trained with a simulated-annealing-style objective.
 
+DISCLAIMER!
+This is 90% vibe-coded and it's still very much a work in progress!
 ---
 
 ## Idea
