@@ -6,7 +6,7 @@ build/
 .eggs/
 
 # data
-data/
+/data/
 *.npz
 *.h5
 *.hdf5
