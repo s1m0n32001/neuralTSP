@@ -3,27 +3,28 @@ TSP Transformer model.
 
 At each autoregressive step the model receives a token sequence:
 
-    [P, A, Q1, Q2, ..., QK]
+    [P, O, Q1, Q2, ..., QK]
 
 where:
-    P  – current city (always at index 0 in the sequence)
-    A  – starting city of the tour (always at index 1)
-    Qi – candidate cities for the next hop
+    P  – current pointer city      (position 0)
+    O  – other pointer city        (position 1, gets a learned additive bias)
+    Qi – candidate cities          (positions 2 …)
 
 All coordinates are translated so that P sits at the origin.
-A and the Qi may coincide only on the very last step (closing the tour).
 
-The forward pass returns a logit for every position in the sequence.
-The caller is responsible for masking P (position 0) out of the softmax —
-it is never a valid next-city candidate.  A (position 1) should likewise
-be masked unless it is the tour-closing step.
+The other-pointer bias lets the model distinguish O from ordinary candidate
+cities — it encodes "this is where the other end of the path currently is".
 
 Architecture
 ------------
-1. Linear embed: (x, y) → d_model
-2. Start bias:  add a learned vector b to A's embedding only
-3. TransformerEncoder: standard multi-head self-attention, batch_first=True
+1. Linear embed: (x, y) → d_model  (shared for all tokens)
+2. Other-pointer bias: add learned vector to O's embedding only
+3. TransformerEncoder: standard multi-head self-attention, batch_first=True,
+   pre-LayerNorm for training stability
 4. Output proj: d_model → 1  (scalar logit per token)
+
+The forward pass returns raw logits for every position.  The caller takes
+logits[:, 2:] as the candidate scores (positions 0 and 1 are never choices).
 """
 
 from __future__ import annotations
@@ -51,9 +52,9 @@ class TSPTransformer(nn.Module):
         # shared linear embedding for all tokens: 2D coord → d_model
         self.embed = nn.Linear(2, cfg.d_model)
 
-        # learned additive bias for the start token A
-        # acts like a type embedding distinguishing A from ordinary cities
-        self.start_bias = nn.Parameter(torch.zeros(cfg.d_model))
+        # learned additive bias for the other-pointer token O
+        # distinguishes it from ordinary candidate cities
+        self.other_bias = nn.Parameter(torch.zeros(cfg.d_model))
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model,
@@ -74,28 +75,28 @@ class TSPTransformer(nn.Module):
 
     def forward(
         self,
-        coords: Tensor,          # (B, S, 2)  relative to current city P
-        is_start: Tensor,        # (B, S) bool — True only for the start token A
+        coords: Tensor,           # (B, S, 2)  relative to current pointer P
+        is_other: Tensor,         # (B, S) bool — True only for the other-pointer token O
         pad_mask: Tensor | None = None,  # (B, S) bool — True = padding, ignored by attention
     ) -> Tensor:
         """
         Parameters
         ----------
         coords   : (B, S, 2) coordinates already translated so P is at (0, 0).
-                   Sequence layout: [P, A, Q1, ..., QK, <pad...>]
-        is_start : (B, S) bool mask — True at position of start token A.
+                   Sequence layout: [P, O, Q1, ..., QK]
+        is_other : (B, S) bool — True at position 1 (the other pointer).
         pad_mask : (B, S) bool — True for padding positions (default: no padding).
 
         Returns
         -------
         logits : (B, S) float  –∞ at padding positions, raw logit elsewhere.
-                 Caller must additionally mask out P (index 0) before softmax.
+                 Caller uses logits[:, 2:] as candidate scores.
         """
         # 1. embed all tokens
         x = self.embed(coords)                          # (B, S, d_model)
 
-        # 2. add start bias to the A token(s)
-        x = x + is_start.unsqueeze(-1).float() * self.start_bias
+        # 2. add other-pointer bias to token O
+        x = x + is_other.unsqueeze(-1).float() * self.other_bias
 
         # 3. transformer — pad_mask shape (B, S), True = ignore
         x = self.transformer(x, src_key_padding_mask=pad_mask)  # (B, S, d_model)
@@ -115,30 +116,30 @@ class TSPTransformer(nn.Module):
     @staticmethod
     def build_inputs(
         current_idx: int,
-        start_idx: int,
-        candidate_idxs: list[int] | "np.ndarray",  # noqa: F821
-        coords: "np.ndarray",                       # (N, 2) full coord array
+        other_idx: int,
+        candidate_idxs: "np.ndarray",  # noqa: F821
+        coords: "np.ndarray",          # (N, 2) full coord array
         device: torch.device,
     ) -> tuple[Tensor, Tensor]:
         """
-        Build (coords_rel, is_start) tensors for a single (unbatched) step.
+        Build (coords_rel, is_other) tensors for a single (unbatched) step.
 
-        Sequence layout: [current, start, *candidates]
+        Sequence layout: [current (P), other pointer (O), *candidates]
 
         Returns
         -------
-        coords_rel : (1, S, 2)
-        is_start   : (1, S) bool
+        coords_rel : (1, S, 2)  — coordinates translated so P is at (0, 0)
+        is_other   : (1, S) bool — True only at position 1
         """
         import numpy as np
 
-        seq_idxs = [current_idx, start_idx, *candidate_idxs]
+        seq_idxs = [current_idx, other_idx, *candidate_idxs]
         raw = coords[seq_idxs]                          # (S, 2)
         raw_rel = raw - raw[0]                          # translate: P → (0, 0)
 
         coords_rel = torch.tensor(raw_rel, dtype=torch.float32, device=device).unsqueeze(0)
 
-        is_start = torch.zeros(1, len(seq_idxs), dtype=torch.bool, device=device)
-        is_start[0, 1] = True                          # position 1 is always A
+        is_other = torch.zeros(1, len(seq_idxs), dtype=torch.bool, device=device)
+        is_other[0, 1] = True                          # position 1 is always O
 
-        return coords_rel, is_start
+        return coords_rel, is_other

@@ -100,10 +100,10 @@ def _loss_at_step(
 
     correct_local = cand_list.index(correct_next)
 
-    coords_t, is_start_t = TSPTransformer.build_inputs(
+    coords_t, is_other_t = TSPTransformer.build_inputs(
         current_idx, start_idx, candidates, coords, device
     )
-    logits = model(coords_t, is_start_t)   # (1, 2 + K)
+    logits = model(coords_t, is_other_t)   # (1, 2 + K)
 
     # candidate logits are at positions [2, 2+K); slice avoids in-place masking
     candidate_logits = logits[:, 2:]       # (1, K)
@@ -162,10 +162,10 @@ def _reverse_loss_at_step(
 
     correct_local = cand_list.index(correct_next)
 
-    coords_t, is_start_t = TSPTransformer.build_inputs(
+    coords_t, is_other_t = TSPTransformer.build_inputs(
         current_idx, start_idx, candidates, coords, device
     )
-    logits = model(coords_t, is_start_t)   # (1, 2 + K)
+    logits = model(coords_t, is_other_t)   # (1, 2 + K)
 
     candidate_logits = logits[:, 2:]       # (1, K)
     target = torch.tensor([correct_local], dtype=torch.long, device=device)
