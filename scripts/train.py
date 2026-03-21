@@ -19,6 +19,7 @@ The temperature decreases linearly from T_start to T_end over all epochs.
 
 import argparse
 import csv
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -122,9 +123,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache_reset_every", type=int, default=10,
                    help="Wipe tour cache every N epochs, forcing fresh prediction (default: 10)")
     # logging / checkpointing
-    p.add_argument("--log_dir",        type=Path, default=Path("logs"))
-    p.add_argument("--checkpoint_dir", type=Path, default=Path("checkpoints"))
-    p.add_argument("--save_every",     type=int,  default=10)
+    p.add_argument("--log_dir",    type=Path, default=Path("logs"),
+                   help="Base directory; each run gets a timestamped sub-folder")
+    p.add_argument("--name",       type=str,  default=None,
+                   help="Optional run name (default: timestamp)")
+    p.add_argument("--save_every", type=int,  default=10)
     # model
     p.add_argument("--d_model",  type=int,   default=128)
     p.add_argument("--n_heads",  type=int,   default=8)
@@ -159,8 +162,11 @@ def main() -> None:
     model = TSPTransformer(cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # one sub-folder per run, everything goes inside it
+    run_name = args.name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = args.log_dir / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Log dir: {run_dir.resolve()}")
 
     grid_size = train_dataset.grid_size
     cache = PathCache()
@@ -218,19 +224,19 @@ def main() -> None:
             run_validation(
                 model, val_dataset, grid_size, device,
                 epoch=epoch + 1,
-                log_dir=args.log_dir,
+                log_dir=run_dir,
                 plot_indices=val_plot_indices,
             )
 
         # --- checkpoint ---
         if (epoch + 1) % args.save_every == 0:
-            ckpt = args.checkpoint_dir / f"epoch_{epoch+1:04d}.pt"
+            ckpt = run_dir / f"epoch_{epoch+1:04d}.pt"
             torch.save({"model": model.state_dict(), "epoch": epoch + 1, "cfg": cfg}, ckpt)
             print(f"  saved {ckpt}")
 
     torch.save(
         {"model": model.state_dict(), "epoch": args.epochs, "cfg": cfg},
-        args.checkpoint_dir / "final.pt",
+        run_dir / "final.pt",
     )
     print("Training complete.")
 
