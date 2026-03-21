@@ -3,37 +3,34 @@ Single training step: simulated-annealing style update.
 
 Algorithm
 ---------
-1.  Predict a full tour with the current model (no gradient).
-2.  Randomly swap two cities at positions i < j in the tour.
-3.  Accept the swap if it shortens the tour, otherwise accept with
-    probability exp(-(E_new - E_old) / T).
-4.  If accepted, compute up to four cross-entropy loss terms and backprop.
+1.  Obtain the current tour (from cache or fresh bidirectional prediction).
+2.  Apply a random 2-opt move: pick positions i < j and reverse new_tour[i:j+1].
+3.  Accept if the new tour is shorter; otherwise accept with probability
+    exp(-(E_new - E_old) / T).
+4.  If accepted, compute the loss for the two pointer predictions that the
+    2-opt move affects, and backprop.
 
-The four loss terms (for swapped positions i and j)
------------------------------------------------------
-For each position p ∈ {i, j} compute both a forward and a reverse term:
+Loss after a 2-opt move at (i, j)
+-----------------------------------
+The reversed segment is new_tour[i : j+1].  In the bidirectional construction,
+the natural training signal is to place the two pointers at the segment
+boundaries and ask the model to predict inward:
 
-  Forward at p  — predict new_tour[p] given the prefix new_tour[:p]:
-      current = new_tour[p-1],  start = new_tour[0]
-      remaining = new_tour[p:]
-      (skipped if p == 0)
+    left pointer  at new_tour[i-1]  →  should predict new_tour[i]
+    right pointer at new_tour[j+1]  →  should predict new_tour[j]
 
-  Reverse at p  — predict new_tour[p] given the suffix new_tour[p+1:] read
-                  right-to-left (i.e. traverse the tour backwards from the end):
-      current = new_tour[p+1],  start = new_tour[-1]
-      remaining = new_tour[:p+1]   (cities not yet visited in reverse)
-      (skipped if p == N-1)
+    remaining for both = new_tour[i : j+1]  (the reversed segment)
+    left's "other"  = new_tour[j+1]  (right pointer's position)
+    right's "other" = new_tour[i-1]  (left pointer's position)
 
-Example: path ABCDEFGH, 2-opt at i=2, j=5 → AB + reverse(CDEF) + GH = ABFEDCGH
-  1. forward  i=2 : current=B, start=A, correct=F, remaining=[F,E,D,C,G,H]
-  2. forward  j=5 : current=D, start=A, correct=C, remaining=[C,G,H]
-  3. reverse  i=2 : current=E, start=H, correct=F, remaining=[F,B,A]
-  4. reverse  j=5 : current=G, start=H, correct=C, remaining=[C,D,E,F,B,A]
+Each term is normalised by log(K) where K = number of candidates seen by that
+pointer.  A term is skipped if the correct city is absent from the candidate
+set, if K == 1, or if the segment touches a tour boundary (i == 0 or
+j == N-1, so one pointer has no boundary city to condition on).
 
-Each term is normalised by log(K) (K = number of candidates) so that
-terms with different candidate set sizes are on a comparable scale.
-A term is skipped entirely if the correct city is absent from the
-candidate set, or if K == 1 (trivially correct, zero information).
+Example: ABCDEFGH, 2-opt at i=2, j=5 → ABFEDCGH
+    left  : current=B, other=G, correct=F, remaining=[F,E,D,C]
+    right : current=G, other=B, correct=C, remaining=[F,E,D,C]
 """
 
 from __future__ import annotations
@@ -58,14 +55,20 @@ class StepResult:
     # Current tour after the step: new_tour if accepted, original tour if not.
     # The caller should write this back to the PathCache.
     tour: list[int]
-    loss: float | None = None          # None if no loss term was computed
-    n_loss_terms: int = 0              # 0 if not accepted or all terms skipped
+    loss: float | None = None       # None if not accepted or all terms skipped
+    n_loss_terms: int = 0
 
 
-def _loss_at_step(
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _pointer_loss(
     model: TSPTransformer,
-    new_tour: list[int],
-    p: int,                            # position in tour we're training on
+    current_idx: int,       # this pointer's current city
+    other_idx: int,         # the other pointer's current city
+    correct_next: int,      # city this pointer should predict
+    remaining: np.ndarray,  # shared remaining pool (both pointers see this)
     coords: np.ndarray,
     cell_ids: np.ndarray,
     grid_size: int,
@@ -73,18 +76,9 @@ def _loss_at_step(
     device: torch.device,
 ) -> torch.Tensor | None:
     """
-    Compute the normalised cross-entropy loss for predicting new_tour[p]
-    given that we have visited new_tour[:p].
-
-    Returns None if the correct next city is not in the candidate set
-    (in which case the caller skips this term).
+    Cross-entropy loss for one pointer prediction, normalised by log(K).
+    Returns None if the correct city is absent from candidates or K == 1.
     """
-    current_idx = new_tour[p - 1]
-    correct_next = new_tour[p]
-    start_idx = new_tour[0]
-
-    remaining = np.array(new_tour[p:], dtype=np.int64)
-
     candidates = build_candidate_indices(
         remaining, coords, cell_ids, current_idx, grid_size, rng
     )
@@ -95,17 +89,15 @@ def _loss_at_step(
 
     K = len(cand_list)
     if K == 1:
-        # Only one choice; loss is trivially 0, skip.
         return None
 
     correct_local = cand_list.index(correct_next)
 
     coords_t, is_other_t = TSPTransformer.build_inputs(
-        current_idx, start_idx, candidates, coords, device
+        current_idx, other_idx, candidates, coords, device
     )
     logits = model(coords_t, is_other_t)   # (1, 2 + K)
 
-    # candidate logits are at positions [2, 2+K); slice avoids in-place masking
     candidate_logits = logits[:, 2:]       # (1, K)
     target = torch.tensor([correct_local], dtype=torch.long, device=device)
 
@@ -113,66 +105,57 @@ def _loss_at_step(
     return ce / math.log(K)
 
 
-def _reverse_loss_at_step(
+def _swap_losses(
     model: TSPTransformer,
     new_tour: list[int],
-    p: int,                            # position in the forward tour
+    i: int,
+    j: int,
     coords: np.ndarray,
     cell_ids: np.ndarray,
     grid_size: int,
     rng: np.random.Generator,
     device: torch.device,
-) -> torch.Tensor | None:
+) -> list[torch.Tensor]:
     """
-    Compute the normalised cross-entropy loss for predicting new_tour[p]
-    when traversing the tour in reverse (right to left).
+    Compute up to two pointer-prediction loss terms for the 2-opt move at (i, j).
 
-    The reverse tour starts at new_tour[-1] and proceeds backwards.
-    At the step corresponding to position p:
-      - already visited (in reverse): new_tour[p+1 :]
-      - current city : new_tour[p+1]
-      - correct next : new_tour[p]
-      - remaining    : new_tour[:p+1]  (not yet visited in reverse)
-      - start of reverse tour : new_tour[-1]
-
-    Returns None if p == N-1 (nothing after p to condition on),
-    or if the correct city is absent from the candidate set, or K == 1.
+    Returns an empty list if the segment touches the tour boundary (i == 0 or
+    j == N-1), since there would be no boundary city to serve as pointer context.
     """
     N = len(new_tour)
-    if p == N - 1:
-        return None
+    if i == 0 or j == N - 1:
+        return []
 
-    current_idx = new_tour[p + 1]
-    correct_next = new_tour[p]
-    start_idx = new_tour[-1]
+    remaining = np.array(new_tour[i:j + 1], dtype=np.int64)
+    left_current  = new_tour[i - 1]   # B
+    right_current = new_tour[j + 1]   # G
+    left_correct  = new_tour[i]        # F  (first city of reversed segment)
+    right_correct = new_tour[j]        # C  (last city of reversed segment)
 
-    remaining = np.array(new_tour[: p + 1], dtype=np.int64)
+    loss_terms: list[torch.Tensor] = []
 
-    candidates = build_candidate_indices(
-        remaining, coords, cell_ids, current_idx, grid_size, rng
+    # left pointer: other = right's position
+    term = _pointer_loss(
+        model, left_current, right_current, left_correct,
+        remaining, coords, cell_ids, grid_size, rng, device,
     )
-    cand_list = candidates.tolist()
+    if term is not None:
+        loss_terms.append(term)
 
-    if correct_next not in cand_list:
-        return None
-
-    K = len(cand_list)
-    if K == 1:
-        return None
-
-    correct_local = cand_list.index(correct_next)
-
-    coords_t, is_other_t = TSPTransformer.build_inputs(
-        current_idx, start_idx, candidates, coords, device
+    # right pointer: other = left's position
+    term = _pointer_loss(
+        model, right_current, left_current, right_correct,
+        remaining, coords, cell_ids, grid_size, rng, device,
     )
-    logits = model(coords_t, is_other_t)   # (1, 2 + K)
+    if term is not None:
+        loss_terms.append(term)
 
-    candidate_logits = logits[:, 2:]       # (1, K)
-    target = torch.tensor([correct_local], dtype=torch.long, device=device)
+    return loss_terms
 
-    ce = F.cross_entropy(candidate_logits, target)
-    return ce / math.log(K)
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def training_step(
     model: TSPTransformer,
@@ -186,31 +169,24 @@ def training_step(
     cached_tour: list[int] | None = None,
 ) -> StepResult:
     """
-    One training iteration on a single TSP instance.
+    One SA training iteration on a single TSP instance.
 
     Parameters
     ----------
-    model       : TSPTransformer
-    optimizer   : torch optimiser (zero_grad / step called here)
-    coords      : (N, 2) city coordinates
-    cell_ids    : (N,)   grid-cell index per city
-    grid_size   : cells per axis
-    rng         : numpy RNG (controls tour prediction sampling + candidate sampling)
-    device      : torch device
-    temperature : SA temperature T ≥ 0; if 0 only improvements are accepted
-    cached_tour : if provided, skip autoregressive prediction and use this tour
-                  as the starting point for the SA move
-
-    Returns
-    -------
-    StepResult whose `.tour` field holds the current tour after the step
-    (new_tour if the swap was accepted, original tour otherwise).
-    The caller should write this back to the PathCache.
+    model        : TSPTransformer
+    optimizer    : torch optimiser
+    coords       : (N, 2) city coordinates
+    cell_ids     : (N,)   grid-cell index per city
+    grid_size    : cells per axis
+    rng          : numpy RNG
+    device       : torch device
+    temperature  : SA temperature T ≥ 0
+    cached_tour  : if given, skip autoregressive prediction and use this tour
     """
     N = len(coords)
 
     # ------------------------------------------------------------------ #
-    # 1. Obtain current tour — from cache or fresh prediction             #
+    # 1. Obtain current tour                                              #
     # ------------------------------------------------------------------ #
     model.eval()
     if cached_tour is not None:
@@ -222,7 +198,7 @@ def training_step(
     E_old = tour_length(tour, coords)
 
     # ------------------------------------------------------------------ #
-    # 2. 2-opt move: reverse the segment between two random positions    #
+    # 2. 2-opt move                                                       #
     # ------------------------------------------------------------------ #
     i, j = sorted(rng.choice(N, size=2, replace=False).tolist())
     new_tour = tour[:i] + tour[i:j + 1][::-1] + tour[j + 1:]
@@ -230,7 +206,7 @@ def training_step(
     E_new = tour_length(new_tour, coords)
 
     # ------------------------------------------------------------------ #
-    # 3. Accept / reject (simulated annealing)                            #
+    # 3. Accept / reject                                                  #
     # ------------------------------------------------------------------ #
     delta = E_new - E_old
     if delta < 0:
@@ -244,28 +220,19 @@ def training_step(
         return StepResult(accepted=False, E_old=E_old, E_new=E_new, tour=tour)
 
     # ------------------------------------------------------------------ #
-    # 4. Compute up to four loss terms and backprop                       #
+    # 4. Compute loss and backprop                                        #
     # ------------------------------------------------------------------ #
     model.train()
 
-    loss_terms: list[torch.Tensor] = []
-
-    for p in [i, j]:
-        # forward: skip position 0 (no previous city)
-        if p > 0:
-            term = _loss_at_step(model, new_tour, p, coords, cell_ids, grid_size, rng, device)
-            if term is not None:
-                loss_terms.append(term)
-
-        # reverse: skip position N-1 (no next city to condition on)
-        term = _reverse_loss_at_step(model, new_tour, p, coords, cell_ids, grid_size, rng, device)
-        if term is not None:
-            loss_terms.append(term)
+    loss_terms = _swap_losses(
+        model, new_tour, i, j, coords, cell_ids, grid_size, rng, device
+    )
 
     if not loss_terms:
-        return StepResult(accepted=True, E_old=E_old, E_new=E_new, tour=new_tour, n_loss_terms=0)
+        return StepResult(accepted=True, E_old=E_old, E_new=E_new,
+                          tour=new_tour, n_loss_terms=0)
 
-    total_loss = sum(loss_terms)   # type: ignore[arg-type]
+    total_loss = sum(loss_terms)  # type: ignore[arg-type]
 
     optimizer.zero_grad()
     total_loss.backward()
