@@ -57,9 +57,9 @@ class StepResult:
     E_new: float
     # Current tour after the step: new_tour if accepted, original tour if not.
     # The caller should write this back to the PathCache.
-    tour: list[int] = None             # type: ignore[assignment]
+    tour: list[int]
     loss: float | None = None          # None if no loss term was computed
-    n_loss_terms: int = 0              # 0 if not accepted or both skipped
+    n_loss_terms: int = 0              # 0 if not accepted or all terms skipped
 
 
 def _loss_at_step(
@@ -212,10 +212,10 @@ def training_step(
     # ------------------------------------------------------------------ #
     # 1. Obtain current tour — from cache or fresh prediction             #
     # ------------------------------------------------------------------ #
+    model.eval()
     if cached_tour is not None:
         tour = cached_tour
     else:
-        model.eval()
         with torch.no_grad():
             tour = predict_tour(model, coords, cell_ids, grid_size, rng, device)
 

@@ -53,8 +53,7 @@ def run_validation(
     device: torch.device,
     epoch: int,
     log_dir: Path,
-    n_plots: int,
-    rng_plots: np.random.Generator,
+    plot_indices: np.ndarray,          # fixed instance indices to plot (chosen once at startup)
 ) -> None:
     """Evaluate on val set, log lengths, and save tour plots."""
 
@@ -73,19 +72,18 @@ def run_validation(
             writer.writerow(["epoch", "mean", "std", "min", "max"])
         writer.writerow([epoch, lengths.mean(), lengths.std(), lengths.min(), lengths.max()])
 
-    # --- tour plots ---
-    if n_plots <= 0:
+    # --- tour plots (same instances every epoch so progress is comparable) ---
+    if len(plot_indices) == 0:
         return
 
     plot_dir = log_dir / "plots" / f"epoch_{epoch:04d}"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    indices = rng_plots.choice(len(val_dataset), size=min(n_plots, len(val_dataset)), replace=False)
-    rng_decode = np.random.default_rng(0)
+    rng_decode = np.random.default_rng(0)   # fixed seed → same start city each epoch
 
     model.eval()
     with torch.no_grad():
-        for rank, idx in enumerate(indices):
+        for idx in plot_indices:
             item = val_dataset[int(idx)]
             coords = item["coords"].numpy()
             cell_ids = item["cell_ids"].numpy()
@@ -142,8 +140,6 @@ def main() -> None:
     print(f"Device: {device}")
 
     rng = np.random.default_rng(args.seed)
-    # separate rng for plot-instance selection so it doesn't affect training
-    rng_plots = np.random.default_rng(args.seed + 1)
 
     train_dataset = TSPDataset(args.train)
     print(f"Train: {train_dataset}")
@@ -168,6 +164,13 @@ def main() -> None:
 
     grid_size = train_dataset.grid_size
     cache = PathCache()
+
+    # choose val plot instances once so the same instances are shown every epoch
+    val_plot_indices: np.ndarray = np.array([], dtype=int)
+    if val_dataset is not None and args.n_val_plots > 0:
+        val_plot_indices = np.random.default_rng(args.seed + 1).choice(
+            len(val_dataset), size=min(args.n_val_plots, len(val_dataset)), replace=False
+        )
 
     for epoch in range(args.epochs):
         # wipe cache at epoch 0 and every cache_reset_every epochs thereafter
@@ -216,8 +219,7 @@ def main() -> None:
                 model, val_dataset, grid_size, device,
                 epoch=epoch + 1,
                 log_dir=args.log_dir,
-                n_plots=args.n_val_plots,
-                rng_plots=rng_plots,
+                plot_indices=val_plot_indices,
             )
 
         # --- checkpoint ---
