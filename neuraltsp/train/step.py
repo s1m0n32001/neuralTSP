@@ -24,11 +24,11 @@ For each position p ∈ {i, j} compute both a forward and a reverse term:
       remaining = new_tour[:p+1]   (cities not yet visited in reverse)
       (skipped if p == N-1)
 
-Example: path ABCDEFGH, swap C(2) and F(5) → ABFDECGH
-  1. forward  i=2 : current=B, start=A, correct=F, remaining=[F,D,E,C,G,H]
-  2. forward  j=5 : current=E, start=A, correct=C, remaining=[C,G,H]
-  3. reverse  i=2 : current=D, start=H, correct=F, remaining=[F,B,A]
-  4. reverse  j=5 : current=G, start=H, correct=C, remaining=[C,E,D,F,B,A]
+Example: path ABCDEFGH, 2-opt at i=2, j=5 → AB + reverse(CDEF) + GH = ABFEDCGH
+  1. forward  i=2 : current=B, start=A, correct=F, remaining=[F,E,D,C,G,H]
+  2. forward  j=5 : current=D, start=A, correct=C, remaining=[C,G,H]
+  3. reverse  i=2 : current=E, start=H, correct=F, remaining=[F,B,A]
+  4. reverse  j=5 : current=G, start=H, correct=C, remaining=[C,D,E,F,B,A]
 
 Each term is normalised by log(K) (K = number of candidates) so that
 terms with different candidate set sizes are on a comparable scale.
@@ -222,11 +222,10 @@ def training_step(
     E_old = tour_length(tour, coords)
 
     # ------------------------------------------------------------------ #
-    # 2. Swap two distinct random positions                               #
+    # 2. 2-opt move: reverse the segment between two random positions    #
     # ------------------------------------------------------------------ #
     i, j = sorted(rng.choice(N, size=2, replace=False).tolist())
-    new_tour = tour.copy()
-    new_tour[i], new_tour[j] = new_tour[j], new_tour[i]
+    new_tour = tour[:i] + tour[i:j + 1][::-1] + tour[j + 1:]
 
     E_new = tour_length(new_tour, coords)
 
